@@ -19,6 +19,7 @@ import (
 	"github.com/opencontainers/runc/libcontainer/cgroups"
 	"github.com/opencontainers/runc/libcontainer/cgroups/fs"
 	"github.com/opencontainers/runc/libcontainer/configs"
+	"k8s.io/kubernetes/pkg/kubelet/cm"
 )
 
 type Manager struct {
@@ -199,6 +200,19 @@ func (m *Manager) Apply(pid int) error {
 			newProp("CPUShares", uint64(c.Resources.CpuShares)))
 	}
 
+	// cpu.cfs_quota_us and cpu.cfs_period_us are controlled by systemd.
+	// The percentage cpuQuota refered specifies how much CPU time the unit
+	// shall get at maximum, relative to the total CPU time available on one CPU.
+	// The percentage should be greater than 1%.
+	if c.Resources.CpuQuota != 0 && c.Resources.CpuPeriod != 0 {
+		cpuQuota := c.Resources.CpuQuota * 100 / c.Resources.CpuPeriod
+		if cpuQuota == 0 {
+			return fmt.Errorf("CpuQuota divided by CpuPeriod must be greater than 0.01")
+		}
+		properties = append(properties,
+			newProp("CPUQuotaPerSecUSec", uint64(cpuQuota*10000)))
+	}
+
 	if c.Resources.BlkioWeight != 0 {
 		properties = append(properties,
 			newProp("BlockIOWeight", uint64(c.Resources.BlkioWeight)))
@@ -222,8 +236,6 @@ func (m *Manager) Apply(pid int) error {
 		return err
 	}
 
-	// TODO: CpuQuota and CpuPeriod not available in systemd
-	// we need to manually join the cpu.cfs_quota_us and cpu.cfs_period_us
 	if err := joinCpu(c, pid); err != nil {
 		return err
 	}
@@ -333,16 +345,6 @@ func joinCpu(c *configs.Cgroup, pid int) error {
 	path, err := getSubsystemPath(c, "cpu")
 	if err != nil && !cgroups.IsNotFound(err) {
 		return err
-	}
-	if c.Resources.CpuQuota != 0 {
-		if err = writeFile(path, "cpu.cfs_quota_us", strconv.FormatInt(c.Resources.CpuQuota, 10)); err != nil {
-			return err
-		}
-	}
-	if c.Resources.CpuPeriod != 0 {
-		if err = writeFile(path, "cpu.cfs_period_us", strconv.FormatInt(c.Resources.CpuPeriod, 10)); err != nil {
-			return err
-		}
 	}
 	if c.Resources.CpuRtPeriod != 0 {
 		if err = writeFile(path, "cpu.rt_period_us", strconv.FormatInt(c.Resources.CpuRtPeriod, 10)); err != nil {
